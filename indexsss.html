@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>多人实时协作画板</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 20px auto; padding: 0 20px; }
+        h1 { text-align: center; color: #333; margin-bottom: 20px; }
+        .tools { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+        button, input { padding: 8px 12px; border: none; border-radius: 4px; cursor: pointer; }
+        button { background: #42b983; color: white; }
+        button:hover { background: #359469; }
+        #colorPicker { width: 50px; height: 35px; padding: 2px; }
+        #lineWidth { width: 100px; }
+        canvas {
+            width: 100%;
+            height: 600px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .status { text-align: center; margin-top: 10px; color: #666; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>多人实时协作画板 🎨</h1>
+    <div class="tools">
+        <button id="clearBtn">清空画板</button>
+        <input type="color" id="colorPicker" value="#000000">
+        <label for="lineWidth">线条粗细：</label>
+        <input type="number" id="lineWidth" min="1" max="50" value="5">
+    </div>
+    <canvas id="drawingCanvas"></canvas>
+    <div class="status">当前在线：<span id="userCount">0</span> 人 | 绘画数据实时同步给所有用户</div>
+</div>
+
+<!-- 引入 Pusher 免费 SDK（无需注册，直接使用测试密钥） -->
+<script src="https://js.pusher.com/8.2.0/pusher.min.js"></script>
+<script>
+    // 1. 初始化 Pusher（公共测试密钥，无需注册，限制：仅测试用，连接数有限）
+    const pusher = new Pusher('d83943006c30e905ff4e', {
+        cluster: 'mt1',
+        forceTLS: true
+    });
+
+    // 2. 订阅公共频道（所有用户共享同一个频道，实现数据广播）
+    const channel = pusher.subscribe('public-drawing-board');
+    let isDrawing = false;
+    const canvas = document.getElementById('drawingCanvas');
+    const ctx = canvas.getContext('2d');
+    const colorPicker = document.getElementById('colorPicker');
+    const lineWidth = document.getElementById('lineWidth');
+    const userCountEl = document.getElementById('userCount');
+
+    // 3. 适配 Canvas 尺寸
+    function resizeCanvas() {
+        const rect = canvas.parentElement.getBoundingClientRect();
+        canvas.width = rect.width;
+        canvas.height = rect.height;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // 4. 绘画核心逻辑
+    function startDrawing(e) {
+        isDrawing = true;
+        draw(e, true); // 初始点
+    }
+
+    function draw(e, isInit = false) {
+        if (!isDrawing && !isInit) return;
+
+        // 获取鼠标/触摸坐标
+        let x, y;
+        if (e.touches) { // 触摸设备
+            x = e.touches[0].clientX - canvas.getBoundingClientRect().left;
+            y = e.touches[0].clientY - canvas.getBoundingClientRect().top;
+        } else { // 鼠标设备
+            x = e.clientX - canvas.getBoundingClientRect().left;
+            y = e.clientY - canvas.getBoundingClientRect().top;
+        }
+
+        // 本地绘制
+        ctx.lineWidth = lineWidth.value;
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = colorPicker.value;
+
+        if (isInit) {
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+        } else {
+            ctx.lineTo(x, y);
+            ctx.stroke();
+        }
+
+        // 5. 向所有用户广播绘画数据（仅非初始点，避免重复）
+        if (!isInit) {
+            channel.trigger('client-draw', {
+                x, y,
+                color: colorPicker.value,
+                width: lineWidth.value,
+                isInit: false
+            });
+        }
+    }
+
+    function endDrawing() {
+        isDrawing = false;
+        ctx.closePath();
+    }
+
+    // 6. 监听本地绘画事件
+    canvas.addEventListener('mousedown', startDrawing);
+    canvas.addEventListener('mousemove', draw);
+    canvas.addEventListener('mouseup', endDrawing);
+    canvas.addEventListener('mouseout', endDrawing);
+
+    // 触摸设备支持
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault(); // 阻止滚动
+        startDrawing(e);
+    });
+    canvas.addEventListener('touchmove', (e) => {
+        e.preventDefault();
+        draw(e);
+    });
+    canvas.addEventListener('touchend', endDrawing);
+    canvas.addEventListener('touchcancel', endDrawing);
+
+    // 7. 监听其他用户的绘画广播（同步绘画）
+    channel.bind('client-draw', (data) => {
+        ctx.strokeStyle = data.color;
+        ctx.lineWidth = data.width;
+        ctx.lineCap = 'round';
+        ctx.lineTo(data.x, data.y);
+        ctx.stroke();
+    });
+
+    // 8. 清空画板功能（同步给所有用户）
+    document.getElementById('clearBtn').addEventListener('click', () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        channel.trigger('client-clear', {}); // 广播清空指令
+    });
+
+    // 监听其他用户的清空指令
+    channel.bind('client-clear', () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    });
+
+    // 9. 在线人数统计（Pusher 自带功能）
+    channel.bind('pusher:subscription_count', (count) => {
+        userCountEl.textContent = count;
+    });
+
+    // 初始化在线人数
+    pusher.connection.bind('connected', () => {
+        userCountEl.textContent = channel.members.count;
+    });
+
+    // 错误处理
+    pusher.connection.bind('error', (err) => {
+        console.error('连接错误：', err);
+        alert('实时连接失败，请刷新页面重试！');
+    });
+</script>
+</body>
+</html>
